@@ -53,7 +53,7 @@ This extension was built around two rules:
 ### From source (developer mode)
 
 ```bash
-git clone https://github.com/<you>/redmine-context-exporter.git
+git clone https://github.com/neomen/redmine-context-exporter.git
 cd redmine-context-exporter
 ```
 
