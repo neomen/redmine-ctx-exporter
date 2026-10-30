@@ -1,0 +1,40 @@
+name: Validate Manifest
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'manifest.json'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'manifest.json'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  validate:
+    name: Validate manifest.json
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install web-ext globally
+        run: npm install -g web-ext
+
+      - name: Lint manifest.json
+        run: |
+          echo "🔍 Checking manifest.json for errors..."
+          web-ext lint --source-dir . --pretty
+
+      - name: Check JSON formatting (optional but recommended)
+        run: |
+          echo "🎨 Checking JSON formatting..."
+          node -e "JSON.parse(require('fs').readFileSync('manifest.json', 'utf8')); console.log('✅ manifest.json is valid JSON')"
