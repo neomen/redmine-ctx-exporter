@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Redmine Context Exporter",
+  "version": "0.1.0",
+  "description": "Export Redmine issues (journals, relations, attachments) to Markdown via REST API.",
+
+  "permissions": ["storage", "scripting", "activeTab", "downloads"],
+  "host_permissions": ["https://projects.nadostudio.com/*"],
+
+  "background": { "service_worker": "background.js", "type": "module" },
+
+  "content_scripts": [{
+    "matches": ["https://projects.nadostudio.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+
+  "action": { "default_popup": "popup.html", "default_title": "Redmine Context Exporter" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": { "16": "icons/16.png", "128": "icons/128.png" }
+}
