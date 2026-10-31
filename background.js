@@ -3,6 +3,7 @@ import { RedmineClient } from './api.js';
 import { Resolver } from './resolver.js';
 import { buildSingleMarkdown, buildBulkMarkdown } from './export.js';
 import { slugify, sanitizeFilename, timestamp } from './util.js';
+import { scanText } from './scanner.js';
 
 const BULK_CONCURRENCY = 4;
 
@@ -60,6 +61,51 @@ function runWithConcurrency(items, limit, worker, onProgress) {
   });
 }
 
+// ---------- confirm with user (in the tab) ----------
+async function confirmWithUser(findings, tabId) {
+  // We group them by patternId so as not to show 20 identical rows.
+  const byPattern = new Map();
+  for (const f of findings) {
+    const entry = byPattern.get(f.patternId) || { label: f.label, count: 0 };
+    entry.count++;
+    byPattern.set(f.patternId, entry);
+  }
+
+  const lines = [...byPattern.entries()]
+    .map(([id, { label, count }]) => `  • ${label} (${id}) — ${count}×`)
+    .join('\n');
+
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: (message) => window.confirm(message),
+      args: [
+        `⚠️ The export contains ${findings.length} potential secret(s):\n\n` +
+        `${lines}\n\n` +
+        `Continue?\n\n` +
+        `OK = download as-is, Cancel = abort export.`
+      ]
+    }, (results) => {
+      resolve(results?.[0]?.result === true);
+    });
+  });
+}
+
+// ---------- scan helper (used by both handlers) ----------
+async function applySecretScan(text, config, tabId) {
+  const mode = config.exportDefaults?.secretScanMode || 'warn';
+  const result = scanText(text, { mode });
+
+  if (result.clean) return { proceed: true, output: text };
+
+  if (result.mode === 'warn') {
+    const ok = await confirmWithUser(result.findings, tabId);
+    if (!ok) return { proceed: false, output: null };
+  }
+
+  return { proceed: true, output: result.output };
+}
+
 // ---------- single ----------
 async function handleSingle({ issueId, baseUrl }, tabId) {
   const config = await getConfig();
@@ -70,10 +116,13 @@ async function handleSingle({ issueId, baseUrl }, tabId) {
   await resolver.ensureDictionaries();
 
   const issue = await client.getIssue(issueId);
-  const md = buildSingleMarkdown(issue, resolver);
-  const filename = `issue-${issue.id}-${slugify(issue.subject)}.md`;
+  const rawMd = buildSingleMarkdown(issue, resolver);
 
-  await downloadInTab(tabId, md, filename);
+  const scan = await applySecretScan(rawMd, config, tabId);
+  if (!scan.proceed) return { count: 0, filename: null, aborted: true };
+
+  const filename = `issue-${issue.id}-${slugify(issue.subject)}.md`;
+  await downloadInTab(tabId, scan.output, filename);
   return { count: 1, filename };
 }
 
@@ -95,8 +144,7 @@ async function handleList({ projectIdentifier, filterQuery, baseUrl }, tabId) {
     throw new Error('No issues match the current filter.');
   }
 
-  // 2. Full issue data (journals[].details only come from /issues/:id.json).
-  //    Preserve the original order from the filter's sort.
+  // 2. Full issue data.
   const fetched = [];
   await runWithConcurrency(
     stubs.map((s, i) => ({ ...s, _idx: i })),
@@ -123,20 +171,21 @@ async function handleList({ projectIdentifier, filterQuery, baseUrl }, tabId) {
   fetched.sort((a, b) => a._idx - b._idx);
   const issues = fetched.map((x) => x.issue);
 
-  const projectName =
-    issues[0]?.project?.name || projectIdentifier || 'Redmine';
-
-  const md = buildBulkMarkdown(issues, resolver, {
+  const projectName = issues[0]?.project?.name || projectIdentifier || 'Redmine';
+  const rawMd = buildBulkMarkdown(issues, resolver, {
     projectName,
     exportedAt: new Date()
   });
+
+  const scan = await applySecretScan(rawMd, config, tabId);
+  if (!scan.proceed) return { count: 0, filename: null, aborted: true };
 
   const filename =
     sanitizeFilename(
       `${slugify(projectIdentifier || 'all-projects')}-${timestamp()}-${issues.length}issues`
     ) + '.md';
 
-  await downloadInTab(tabId, md, filename);
+  await downloadInTab(tabId, scan.output, filename);
   return { count: issues.length, filename };
 }
 

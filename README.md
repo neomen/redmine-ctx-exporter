@@ -25,6 +25,7 @@
 - **Filter passthrough, not filter translation** — the extension reads the `<form id="query_form">` and sends `f[]` / `op[]` / `v[]` / `sort` / `group_by` straight to `/issues.json`. Whatever the UI shows, the API returns. No reimplementation of Redmine's filter grammar.
 - **Uses the REST API, not DOM scraping** — issues come from `/issues/:id.json` with `include=journals,relations,attachments,children`, so long histories and nested subtasks are complete and reliable.
 - **Human-readable output** — resolved statuses, trackers, priorities, assignees, and change history with `old → new` values, so the resulting Markdown is directly usable as context for an LLM (ChatGPT, Claude, DeepSeek, …) or as an archive.
+- **Built-in secret scanning** — before the file is saved, the extension checks the generated Markdown for API keys, tokens, passwords, private keys, and DB URIs. You choose to be warned, redact, or skip. 100% local, no telemetry.
 - **Progress feedback** — for large projects the inline button shows `Fetching… 12/47`.
 - **SPA-friendly** — works when you navigate between issues via Redmine's own links.
 
@@ -37,7 +38,7 @@ This extension was built around two rules:
 > **1. Your conversations never leave your browser.**
 > **2. Your API key never leaves your browser.**
 
-- 🟢 **All processing is local.** The extension reads your Redmine via its REST API and writes a Markdown file to disk. Nothing else.
+- 🟢 **All processing is local.** The extension reads your Redmine via its REST API, scans the resulting Markdown for secrets, and writes the file to disk. Nothing else.
 - 🟢 **No third-party servers.** The only network requests are to the Redmine instance you configured. There are no analytics endpoints, no update pings, no crash reporting.
 - 🟢 **No telemetry, no analytics.** None.
 - 🟢 **No accounts, no sign-up.**
@@ -56,6 +57,8 @@ This extension was built around two rules:
 git clone https://github.com/neomen/redmine-context-exporter.git
 cd redmine-context-exporter
 ```
+
+> ℹ️ The extension bundles `secret-sniffer.mjs` (a small, dependency-free secret scanner) in the repository root. If it's missing, copy it from the [secret-sniffer releases](https://github.com/neomen/secret-sniffer/releases) before loading the extension.
 
 1. Open `chrome://extensions/`
 2. Enable **Developer mode** (top-right toggle)
@@ -76,6 +79,8 @@ On first use, open the extension's **Options** page and fill in two fields:
 |---|---|
 | **Redmine URL** | Full origin of your Redmine, e.g. `https://projects.nadostudio.com` (no trailing slash, no `/issues`). |
 | **API key** | Redmine → **My account** → *API access key* → **Show**. |
+
+Then choose a **Secret scanning** mode (see below). The default — *Warn & ask before download* — is the safest option.
 
 Click **Test connection**. On success you should see `Connected as <Your Name> (id N)`. If it fails with `401`, double-check that:
 
@@ -104,6 +109,24 @@ The extension also requires the **`host_permissions`** entry for your Redmine or
    - one full section per issue (same content as the single-issue export).
 
 The **filter you configured in the UI is read directly from the form** and forwarded to the API — you don't have to re-enter anything.
+
+---
+
+## 🔐 Secret scanning
+
+Redmine issues frequently contain pasted credentials — an `AKIA…` key in a debug log, an OpenAI token in a stacktrace, a `password: …` line in a config dump. The extension scans the generated Markdown **before** it hits your disk.
+
+Three modes, selectable in **Options → Export defaults → Secret scanning**:
+
+| Mode | Behaviour |
+|---|---|
+| **warn** (default) | A confirmation dialog lists what was found (pattern label + count). Click **OK** to download as-is, **Cancel** to abort. |
+| **redact** | Matches are replaced with `[REDACTED]` in the downloaded file. |
+| **off** | No scanning. |
+
+Detection covers AWS / Google / Azure keys, OpenAI / Anthropic / GitHub / GitLab / Stripe / Slack / Twilio / SendGrid / npm / PyPI / Cloudflare / Square / Shopify tokens, JWTs, PEM private keys, DB URIs, `Authorization:` headers, and `password:` / `пароль:` style assignments. The rule set lives in the bundled [`secret-sniffer`](https://github.com/neomen/secret-sniffer) library; add company-specific patterns by uncommenting `CUSTOM_PATTERNS` in `scanner.js`.
+
+Everything runs in the service worker — **no secret values are ever sent anywhere**, and `scan()` returns only `{patternId, label, index, length}`, never the matched text.
 
 ---
 
@@ -176,7 +199,7 @@ If your instance has a non-default *Issues API* configuration, open an issue wit
 |---|---|
 | `storage` | Save your Redmine URL and API key locally (`chrome.storage.local`), and cache reference data (`chrome.storage.session`). |
 | `activeTab` | Send the "export" message to the focused tab only. |
-| `scripting` | Inject a small download helper into the page so the browser reliably saves large `.md` files. |
+| `scripting` | Inject a small download helper into the tab so the browser reliably saves large `.md` files, and show the secret-scan confirmation dialog. |
 | `downloads` | _Not requested._ The extension avoids the broad download permission and writes the file through a `<a download>` inside the tab. |
 | `host_permissions` (`https://projects.nadostudio.com/*`) | To call the Redmine REST API from the service worker. The extension **does not** request `<all_urls>`, `webRequest`, `cookies`, or any other sensitive permission. |
 
@@ -195,10 +218,12 @@ content.js                 runs on Redmine pages
  └─ placeListButton()
 
 background.js              service worker (ESM)
- ├─ handleSingle()         GET /issues/:id.json → build .md → download
+ ├─ handleSingle()         GET /issues/:id.json → build .md → scan → download
  ├─ handleList()           GET /projects/:slug/issues.json (paginated)
  │                        → N× GET /issues/:id.json (concurrency 4)
- │                        → build one .md → download
+ │                        → build one .md → scan → download
+ ├─ applySecretScan()      routes warn / redact / off
+ ├─ confirmWithUser()      shows the pre-download dialog listing findings
  └─ runWithConcurrency()   tiny promise pool, no dependencies
 
 api.js                     RedmineClient
@@ -216,6 +241,12 @@ export.js                  MarkdownBuilder
  ├─ buildSingleMarkdown()
  └─ buildBulkMarkdown()    with table of contents
 
+scanner.js                 thin wrapper over secret-sniffer.mjs
+ ├─ scanText()             warn / redact / off, plus CUSTOM_PATTERNS
+ └─ CUSTOM_PATTERNS        add your own token formats here
+
+secret-sniffer.mjs         bundled dependency (MIT, zero runtime deps)
+
 util.js                    slugify / sanitizeFilename / timestamp
 ```
 
@@ -229,6 +260,7 @@ Adding a new data source (e.g. time entries, watchers, custom enumerations) = on
 - **Description is preserved verbatim.** If your project uses Textile or Markdown in descriptions, the export keeps that source text instead of converting it to HTML/Markdown. This is the best format for LLM consumption, and the only lossless one.
 - **Custom field values that are lists of enumerations** render as comma-joined values. Enumeration labels for *custom* fields are not resolved — the API sends them, but the extension uses the values as-is (usually numeric). Easy to extend if you tell us which CFs matter.
 - **`/users.json` is never called** — it requires admin privileges. In journal `Changes:` lines, an assignee whose ID never appeared in `issue.author / assigned_to / journals[].user` renders as `user#<id>`.
+- **Secret detection is heuristic.** It recognises well-known token formats and common `password = …` assignments, but cannot guarantee finding arbitrary or previously unseen secrets. False positives and negatives are possible. Treat it as defense-in-depth, not as a replacement for secret management or access control.
 - **Streaming / in-progress edits** — exports capture the state at the moment you click. If you started writing a comment but haven't saved it, it won't appear.
 
 ---
@@ -252,6 +284,10 @@ Adding a new data source (e.g. time entries, watchers, custom enumerations) = on
 
 Your user doesn't have `view_issues` on that project. The extension silently skips 403 issues in bulk exports (they're excluded from the count), and logs a warning to the service worker console (`chrome://extensions` → *Inspect views: service worker*).
 
+### Secret scan dialog keeps appearing
+
+The `warn` mode shows a dialog for every match. If your issues routinely contain things like `password: test` in documentation, either switch the mode to **redact** (silent replacement) or **off** (no scanning). For company-specific false positives, the cleanest fix is adding a *negative lookahead* to a custom pattern in `scanner.js`.
+
 ### Self-signed HTTPS
 
 Chrome will refuse the request at the network layer regardless of the extension. Install the CA in the OS trust store, or launch Chrome with the appropriate flag for your test environment.
@@ -269,6 +305,7 @@ PRs are welcome, especially:
 - **Custom enumerations resolver** — for projects that use `list` type custom fields (dropdowns) whose labels need to be resolved through `/enumerations/issue_custom_field_values/:cf_id.json`.
 - **Time entries** — `include=time_entries` is available in Redmine 4+; a checkbox in the options page is enough to enable it.
 - **Attachments download** — an opt-in to save attachments next to the `.md` (with a subfolder and manifest entry).
+- **More secret patterns** — extend `CUSTOM_PATTERNS` in `scanner.js`, or send them upstream to [`secret-sniffer`](https://github.com/neomen/secret-sniffer).
 - **Firefox MV3** — the code is already ESM and uses only WebExtension APIs, but a manifest tweak is needed (`background.scripts` instead of `background.service_worker`).
 - **Redmine 6.x testing.**
 
